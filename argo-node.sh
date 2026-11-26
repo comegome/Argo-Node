@@ -2,7 +2,8 @@
 # argo-node — 单机 + Cloudflare Argo 隧道，把本机变成一个出口节点
 #
 # 交互式，无子命令。运行一次，脚本自己判断该装、该查还是该卸。
-# 只写这四个路径：/usr/local/bin/argo-node、/etc/argo-node/、sing-box 配置、systemd unit
+# 只写这四个路径：/usr/local/bin/argo-node、/etc/argo-node/（含自己的 sing-box 配置）、systemd unit
+# 不共用 /etc/sing-box/config.json，与 Simple-Box 之类的 sing-box 管理脚本互不干扰。
 # 不开放任何公网端口，入口只在 127.0.0.1。
 
 set -u
@@ -11,7 +12,9 @@ STATE_DIR=/etc/argo-node
 NODE_JSON=$STATE_DIR/node.json
 TOKEN_ENV=$STATE_DIR/tunnel.env
 BACKUP_DIR=$STATE_DIR/backup
-SB_CONF=/etc/sing-box/config.json
+SB_CONF=$STATE_DIR/sing-box.json
+SB_SVC=sing-box-argo
+SB_UNIT=/etc/systemd/system/$SB_SVC.service
 SB_TAG=argo-ws
 CF_SVC=cloudflared-argo
 CF_UNIT=/etc/systemd/system/$CF_SVC.service
@@ -56,30 +59,68 @@ install_cloudflared() {
   ok "cloudflared $(cloudflared --version | awk '{print $3}') 已安装"
 }
 
+migrate_legacy_inbound() {
+  # 旧版本把 argo-ws 追加进 /etc/sing-box/config.json。这里把它搬进自己的文件，
+  # 并从共享配置里摘掉，避免两个实例抢同一个端口。
+  local legacy=/etc/sing-box/config.json
+  [ -f "$legacy" ] || return 0
+  [ -f "$SB_CONF" ] && return 0
+  mkdir -p "$STATE_DIR"
+  local r
+  r=$(python3 - "$legacy" "$SB_CONF" "$SB_TAG" <<'PY'
+import json, sys
+legacy, new, tag = sys.argv[1:4]
+try:
+    d = json.load(open(legacy))
+except Exception:
+    sys.exit(1)
+inb = [i for i in d.get("inbounds", []) if i.get("tag") == tag]
+if not inb:
+    sys.exit(1)
+json.dump({"log": d.get("log", {"level": "warn"}), "inbounds": inb,
+           "outbounds": [{"type": "direct"}]},
+          open(new, "w"), indent=2, ensure_ascii=False)
+d["inbounds"] = [i for i in d.get("inbounds", []) if i.get("tag") != tag]
+json.dump(d, open(legacy, "w"), indent=2, ensure_ascii=False)
+print("migrated")
+PY
+) || return 0
+  if [ "$r" = "migrated" ]; then
+    chmod 600 "$SB_CONF"
+    # 共享配置若还有服务在跑，重启它释放端口
+    if systemctl list-unit-files 2>/dev/null | grep -q "^sing-box.service"; then
+      systemctl restart sing-box >/dev/null 2>&1 || true
+    fi
+    ok "已把 $SB_TAG 从共享配置迁到 $SB_CONF"
+  fi
+}
+
 ensure_singbox() {
   if command -v sing-box >/dev/null; then
     ok "sing-box $(sing-box version | head -1 | awk '{print $3}') 已安装"
-    SB_MANAGED=false
-    return
+  else
+    local a ver; a=$(arch_tag)
+    ver=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+          | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"].lstrip("v"))') \
+          || die "查询 sing-box 版本失败"
+    curl -fsSL -o /tmp/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v$ver/sing-box-$ver-linux-$a.tar.gz" \
+      || die "下载 sing-box 失败"
+    tar xzf /tmp/sb.tar.gz -C /tmp && install -m 755 "/tmp/sing-box-$ver-linux-$a/sing-box" /usr/local/bin/sing-box
+    rm -rf /tmp/sb.tar.gz "/tmp/sing-box-$ver-linux-$a"
+    ok "sing-box $ver 已安装"
   fi
-  local a ver; a=$(arch_tag)
-  ver=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-        | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"].lstrip("v"))') \
-        || die "查询 sing-box 版本失败"
-  curl -fsSL -o /tmp/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v$ver/sing-box-$ver-linux-$a.tar.gz" \
-    || die "下载 sing-box 失败"
-  tar xzf /tmp/sb.tar.gz -C /tmp && install -m 755 "/tmp/sing-box-$ver-linux-$a/sing-box" /usr/local/bin/sing-box
-  rm -rf /tmp/sb.tar.gz "/tmp/sing-box-$ver-linux-$a"
-  mkdir -p /etc/sing-box
+
+  migrate_legacy_inbound
+  mkdir -p "$STATE_DIR"
   [ -f "$SB_CONF" ] || printf '%s\n' '{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct"}]}' > "$SB_CONF"
-  cat > /etc/systemd/system/sing-box.service <<'EOF'
+  cat > "$SB_UNIT" <<EOF
 [Unit]
-Description=sing-box
+Description=sing-box (argo-node inbound)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=/usr/local/bin/sing-box run -c $SB_CONF
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=infinity
@@ -88,9 +129,9 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now sing-box >/dev/null 2>&1
+  systemctl enable "$SB_SVC" >/dev/null 2>&1
   SB_MANAGED=true
-  ok "sing-box $ver 已安装并启动"
+  ok "sing-box 实例 $SB_SVC 就绪（配置 $SB_CONF）"
 }
 
 # ---------- 配置 ----------
@@ -394,18 +435,13 @@ do_uninstall() {
     systemctl daemon-reload
     ok "隧道服务已停止并删除"
   fi
-  if [ -f "$SB_CONF" ] && command -v sing-box >/dev/null; then
-    local r; r=$(remove_inbound)
-    if [ "$r" = "removed" ]; then
-      if sing-box check -c "$SB_CONF" >/dev/null 2>&1; then
-        systemctl restart sing-box >/dev/null 2>&1 && ok "sing-box inbound 已移除并重载"
-      else
-        warn "移除后配置校验失败，未重载 sing-box（原配置未改动前已备份）"
-      fi
-    else
-      ok "sing-box 里没有 $SB_TAG，跳过"
-    fi
+  if systemctl list-unit-files 2>/dev/null | grep -q "^$SB_SVC.service"; then
+    systemctl disable --now "$SB_SVC" >/dev/null 2>&1
+    rm -f "$SB_UNIT"
+    systemctl daemon-reload
+    ok "sing-box 实例 $SB_SVC 已停止并删除"
   fi
+  rm -f "$SB_CONF"
   rm -rf "$STATE_DIR"
   ok "本地状态已清除"
   say ""
@@ -483,7 +519,7 @@ install_flow() {
   cp -a "$SB_CONF" "$BACKUP_DIR/config.json.$(date +%Y%m%d_%H%M%S)"
   apply_inbound
   if sing-box check -c "$SB_CONF" >/dev/null 2>&1; then
-    systemctl restart sing-box >/dev/null 2>&1
+    systemctl restart "$SB_SVC" >/dev/null 2>&1
     ok "本地入口已写入（仅监听回环）"
   else
     cp -a "$(ls -t "$BACKUP_DIR"/config.json.* | head -1)" "$SB_CONF"

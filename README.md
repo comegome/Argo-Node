@@ -46,12 +46,19 @@ sudo bash /tmp/argo-node.sh
 ## 落盘
 
 ```
-/etc/argo-node/node.json   # 安装期常量：host / port / uuid / path
-/etc/argo-node/tunnel.env  # tunnel token，600
-/etc/argo-node/backup/     # 改 sing-box 配置前的备份
+/etc/argo-node/node.json       # 安装期常量：host / port / uuid / path
+/etc/argo-node/tunnel.env      # tunnel token，600
+/etc/argo-node/sing-box.json   # 本机自己的 sing-box 配置，600
+/etc/argo-node/backup/         # 改配置前的备份
+/etc/systemd/system/sing-box-argo.service
+/etc/systemd/system/cloudflared-argo.service
 ```
 
-除这几处外不写任何东西。`cloudflared` 是共享依赖，卸载时不删。
+除这几处外不写任何东西。`cloudflared` 与 `sing-box` 二进制是共享依赖，卸载时不删。
+
+**不碰 `/etc/sing-box/config.json`**：Simple-Box 之类的脚本按自己的 `env.conf` 重写那份配置，把 inbound 追加进去会静默消失。本脚本用独立实例（`sing-box-argo.service` + 自己的配置文件），两者可以并存。
+
+旧版本（≤ 2026-11-26）把 inbound 追加在共享配置里；新版本首次运行会自动把它迁到 `/etc/argo-node/sing-box.json` 并从共享配置里摘掉，然后重启共享实例释放端口。
 
 ## 卸载
 
