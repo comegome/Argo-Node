@@ -194,8 +194,13 @@ check_tunnel() {
     fi
     return 1
   fi
-  local n
-  n=$(journalctl -u "$CF_SVC" --no-pager -n 200 2>/dev/null | grep -c "Registered tunnel connection")
+  local n since
+  since=$(systemctl show -p ActiveEnterTimestamp --value "$CF_SVC" 2>/dev/null)
+  if [ -n "$since" ]; then
+    n=$(journalctl -u "$CF_SVC" --since "$since" --no-pager 2>/dev/null | grep -c "Registered tunnel connection")
+  else
+    n=$(journalctl -u "$CF_SVC" --no-pager -n 200 2>/dev/null | grep -c "Registered tunnel connection")
+  fi
   [ "$n" -ge 1 ] || { warn "隧道进程在跑，但没有注册到任何边缘（token 多半无效）"; return 1; }
   ok "隧道已连接（$n 条边缘连接）"
 }
