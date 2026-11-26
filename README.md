@@ -59,6 +59,18 @@ sudo bash /tmp/argo-node.sh
 
 **面板里还要手动删两样**：隧道本身、对应的 CNAME 记录。模式 A 不持有 CF API 凭证，脚本删不了远端。
 
+## 客户端配置
+
+校验通过后脚本会打印一份**完整 mihomo 配置**（不是片段），可以直接作为独立 profile 导入：
+
+- `tun.enable: true`，`stack: system`，`auto-route` + `dns-hijack: any:53`
+- `dns` 用 fake-ip + 国内公共 DNS（223.5.5.5 / 119.29.29.29）
+- `tcp-concurrent: true`（DNS 解析出多个 IP 时并发拨号取最快）
+- 一个 `select` 组，只含该节点和 DIRECT
+- 规则：`GEOIP,CN,DIRECT` + `MATCH,PROXY`
+
+已用 mihomo v1.19.34 实测通过 `-t` 校验。要改端口或加节点直接改这份 YAML。
+
 ## 安全
 
 - 仓库里没有任何密钥。token 是运行时输入的，只存在目标机 `/etc/argo-node/tunnel.env`（600）

@@ -325,8 +325,32 @@ do_check() {
 }
 
 print_client() {
-  step "客户端配置（ClashX Meta / mihomo）"
+  step "客户端配置（mihomo / ClashX Meta，已启用 TUN）"
   cat <<EOF
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+tcp-concurrent: true
+
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+  auto-detect-interface: true
+  dns-hijack:
+    - any:53
+
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
 
 proxies:
   - name: ${HOST%%.*}
@@ -343,6 +367,17 @@ proxies:
       path: $WSPATH
       headers:
         Host: $HOST
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - ${HOST%%.*}
+      - DIRECT
+
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
 
 EOF
 }
