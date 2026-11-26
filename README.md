@@ -59,6 +59,21 @@ sudo bash /tmp/argo-node.sh
 
 **面板里还要手动删两样**：隧道本身、对应的 CNAME 记录。模式 A 不持有 CF API 凭证，脚本删不了远端。
 
+## 性能
+
+隧道默认走 **HTTP/2** 而不是 QUIC。同一台 1 核机器、同一份 100MB 传输实测：
+
+| 协议 | 吞吐 | cloudflared CPU | 单位开销 |
+|---|---|---|---|
+| QUIC | 32 Mbps | 11.97s | 114 ms/MB |
+| HTTP/2 | 36 Mbps | 7.48s | 71 ms/MB |
+
+HTTP/2 省约 38% 的 CPU，吞吐还略高。瓶颈在 cloudflared 而不是 sing-box——同样 100MB，sing-box 只花 0.6–0.7 秒，cloudflared 要 7 秒左右。
+
+`GOGC=200` 也试过，只快 3%，属于噪声，没加。
+
+如果落地机到 CF 的链路丢包严重（不是带宽问题），可以改回 QUIC：把 unit 里的 `--protocol http2` 去掉即可，UDP 的重传策略在丢包环境下更好。
+
 ## 客户端配置
 
 校验通过后脚本会打印一份**完整 mihomo 配置**（不是片段），可以直接作为独立 profile 导入：

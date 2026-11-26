@@ -174,7 +174,7 @@ Wants=network-online.target
 Type=notify
 TimeoutStartSec=20
 EnvironmentFile=$TOKEN_ENV
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 run
 Restart=on-failure
 RestartSec=5
 
