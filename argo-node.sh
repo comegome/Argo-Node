@@ -344,7 +344,7 @@ guide_tunnel() {
   step "先在 CF 控制台建隧道（30 秒）"
   cat <<'EOF'
    Zero Trust → Networks → Tunnels → Create a tunnel
-     1. 选 Cloudflared，命名（例如 cc-argo）
+     1. 选 Cloudflared，命名（例如 argo-node）
      2. 保存后复制页面上那段 token（很长的一串）
      3. Public Hostname 先别加，等脚本装完会告诉你端口
 EOF
@@ -354,7 +354,7 @@ install_flow() {
   preflight
   guide_tunnel
   say ""
-  printf '公网域名（例如 node.example.com）: '
+  printf '公网域名（客户端要连的地址，需在 CF 面板为该隧道建 Public Hostname，例如 argo-node.example.com）: '
   read -r HOST
   printf 'Tunnel token: '
   read -rs TOKEN
