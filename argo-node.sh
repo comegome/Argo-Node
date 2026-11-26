@@ -192,6 +192,32 @@ extract_token() {
   printf '%s' "${t:-$raw}"
 }
 
+# 令牌必须是 base64 的 {"a":账户,"t":隧道,"s":密钥}
+token_ok() {
+  python3 - "$1" <<'PY'
+import sys, json, base64
+t = sys.argv[1].strip()
+try:
+    d = json.loads(base64.urlsafe_b64decode(t + "=" * (-len(t) % 4)))
+    ok = isinstance(d, dict) and {"a", "t", "s"} <= set(d)
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+}
+
+token_tunnel_id() {
+  python3 - "$1" <<'PY'
+import sys, json, base64
+t = sys.argv[1].strip()
+try:
+    d = json.loads(base64.urlsafe_b64decode(t + "=" * (-len(t) % 4)))
+    print(str(d.get("t", ""))[:8])
+except Exception:
+    print("")
+PY
+}
+
 # ---------- 校验 ----------
 
 check_tunnel() {
@@ -373,14 +399,15 @@ install_flow() {
   guide_tunnel
   say ""
   printf 'Tunnel token（粘贴后回车，输入不回显）: '
-  read -rs TOKEN
+  TOKEN=""
+  for _ in 1 2 3 4 5 6 7 8; do
+    IFS= read -rs LINE || break
+    CAND=$(extract_token "$LINE")
+    if token_ok "$CAND"; then TOKEN=$CAND; break; fi
+  done
   say ""
-  [ -n "${TOKEN:-}" ] || die "token 不能为空"
-  RAW=$TOKEN
-  TOKEN=$(extract_token "$RAW")
-  [ "$TOKEN" != "$RAW" ] && ok "已从粘贴内容中提取令牌"
-  [ ${#TOKEN} -ge 40 ] || die "这段内容不像隧道令牌（只有 ${#TOKEN} 个字符）"
-  ok "已读取令牌：${#TOKEN} 字符，末 4 位 ${TOKEN: -4}"
+  [ -n "$TOKEN" ] || die "没找到隧道令牌（令牌是一段 base64，粘贴时带上整条命令也可以）"
+  ok "已读取令牌：${#TOKEN} 字符，隧道 $(token_tunnel_id "$TOKEN")…"
 
   step "启动隧道"
   setup_service
