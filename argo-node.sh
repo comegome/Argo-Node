@@ -275,11 +275,10 @@ check_ws() {
 
 dashboard_hint() {
   say ""
-  say "   面板里加一条 Public Hostname："
-  say "     域名    $HOST"
-  say "     类型    HTTP"
-  say "     地址    127.0.0.1:$PORT"
-  say "     Path    留空"
+  say "   在 Tunnels → 这条隧道 → 添加路由："
+  say "     主机名：$HOST"
+  say "     路径：留空"
+  say "     服务地址：http://127.0.0.1:$PORT"
 }
 
 do_check() {
@@ -404,13 +403,12 @@ install_flow() {
   UUID=$(python3 -c 'import uuid;print(uuid.uuid4())')
   WSPATH="/$(python3 -c 'import secrets;print(secrets.token_hex(8))')"
 
-  step "写入本地入口"
   mkdir -p "$BACKUP_DIR"
   cp -a "$SB_CONF" "$BACKUP_DIR/config.json.$(date +%Y%m%d_%H%M%S)"
   apply_inbound
   if sing-box check -c "$SB_CONF" >/dev/null 2>&1; then
     systemctl restart sing-box >/dev/null 2>&1
-    ok "inbound $SB_TAG 已加入（只监听 127.0.0.1）"
+    ok "本地入口已写入（仅监听回环）"
   else
     cp -a "$(ls -t "$BACKUP_DIR"/config.json.* | head -1)" "$SB_CONF"
     die "配置校验失败，已还原，未做任何改动"
