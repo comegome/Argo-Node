@@ -15,6 +15,7 @@ SB_CONF=/etc/sing-box/config.json
 SB_TAG=argo-ws
 CF_SVC=cloudflared-argo
 CF_UNIT=/etc/systemd/system/$CF_SVC.service
+PORT_BASE=${ARGO_PORT:-2080}
 
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -96,11 +97,12 @@ EOF
 
 pick_port() {
   local p
-  for _ in $(seq 1 50); do
-    p=$(( (RANDOM % 20000) + 20000 ))
-    ss -lnt 2>/dev/null | grep -q ":$p " || { echo "$p"; return; }
+  for p in $(seq "$PORT_BASE" $((PORT_BASE + 20))); do
+    if ! ss -lnt 2>/dev/null | grep -q ":$p "; then echo "$p"; return; fi
+    # 占用者是 sing-box 就复用（多半是我们上次装的那条 inbound）
+    if ss -lntp 2>/dev/null | grep ":$p " | grep -q "sing-box"; then echo "$p"; return; fi
   done
-  die "找不到空闲端口"
+  die "端口 ${PORT_BASE}-$((PORT_BASE + 20)) 都不可用"
 }
 
 apply_inbound() {
@@ -253,7 +255,11 @@ check_ws() {
     404) warn "路径没对上（HTTP 404）——面板里的 Path 或本地 path 不一致"; return 1 ;;
     502|503) warn "边缘连不上本机（HTTP $code）——面板端口应填 127.0.0.1:$PORT"; return 1 ;;
     1033) warn "隧道没有活跃连接（HTTP 1033）"; return 1 ;;
-    000|"") warn "连不上 $HOST:443"; return 1 ;;
+    000|"")
+      warn "连不上 $HOST:443"
+      say "       DNS 已指向 CF，但边缘没有这条隧道的路由"
+      say "       常见原因：DNS 里加的是 A 记录，而不是在隧道页面加 Public Hostname"
+      return 1 ;;
     *) warn "意外的响应（HTTP $code）"; return 1 ;;
   esac
 }
@@ -346,7 +352,7 @@ guide_tunnel() {
    Zero Trust → Networks → Tunnels → Create a tunnel
      1. 选 Cloudflared，命名（例如 argo-node）
      2. 保存后复制页面上那段 token（很长的一串）
-     3. Public Hostname 先别加，等脚本装完会告诉你端口
+     3. Public Hostname 先别加，下一步脚本会给你要填的地址
 EOF
 }
 
@@ -363,33 +369,39 @@ install_flow() {
 
   guide_tunnel
   say ""
-  printf '公网域名（客户端要连的地址，需在 CF 面板为该隧道建 Public Hostname，例如 argo-node.example.com）: '
-  read -r HOST
   printf 'Tunnel token（粘贴后回车，输入不回显）: '
   read -rs TOKEN
   say ""
-  [ -n "${HOST:-}" ] && [ -n "${TOKEN:-}" ] || die "域名和 token 都不能为空"
+  [ -n "${TOKEN:-}" ] || die "token 不能为空"
   ok "已读取 token：${#TOKEN} 字符，末 4 位 ${TOKEN: -4}"
 
   PORT=$(pick_port)
   UUID=$(python3 -c 'import uuid;print(uuid.uuid4())')
   WSPATH="/$(python3 -c 'import secrets;print(secrets.token_hex(8))')"
 
-  step "将要写入"
-  say "   域名      $HOST"
-  say "   本地入口  127.0.0.1:$PORT（不开放公网端口）"
-
-  step "写入 sing-box"
+  step "写入本地入口"
   mkdir -p "$BACKUP_DIR"
   cp -a "$SB_CONF" "$BACKUP_DIR/config.json.$(date +%Y%m%d_%H%M%S)"
   apply_inbound
   if sing-box check -c "$SB_CONF" >/dev/null 2>&1; then
     systemctl restart sing-box >/dev/null 2>&1
-    ok "inbound $SB_TAG 已加入（127.0.0.1:$PORT）"
+    ok "inbound $SB_TAG 已加入（只监听 127.0.0.1）"
   else
     cp -a "$(ls -t "$BACKUP_DIR"/config.json.* | head -1)" "$SB_CONF"
     die "配置校验失败，已还原，未做任何改动"
   fi
+
+  step "去 CF 面板给这条隧道加 Public Hostname"
+  say "   类型      HTTP"
+  say "   Path      留空"
+  say "   服务地址  http://127.0.0.1:$PORT"
+  say ""
+  say "   上面那行直接复制到 Service URL 输入框。"
+  say "   如果 zone 里已经有同名的 A 记录，先删掉——A 记录不会导进隧道。"
+  say ""
+  printf '公网域名（刚才在面板里填的那个，例如 argo-node.example.com）: '
+  read -r HOST
+  [ -n "${HOST:-}" ] || die "域名不能为空"
 
   save_node
   step "启动隧道"
