@@ -183,6 +183,15 @@ EOF
   systemctl enable --now "$CF_SVC" >/dev/null 2>&1
 }
 
+# 从粘贴内容里取令牌：直接粘令牌、cloudflared service install ...、docker run ... --token ... 都认
+extract_token() {
+  local raw t
+  raw=${1//\"/}
+  raw=${raw//\'/}
+  t=$(printf '%s' "$raw" | grep -oE '[A-Za-z0-9_=-]{40,}' | head -1)
+  printf '%s' "${t:-$raw}"
+}
+
 # ---------- 校验 ----------
 
 check_tunnel() {
@@ -339,21 +348,16 @@ do_uninstall() {
   ok "本地状态已清除"
   say ""
   say "还需要你在 CF 控制台手动删除："
-  say "  1. Zero Trust → Networks → Tunnels → 删除这个隧道"
-  say "  2. DNS → 删除对应的 CNAME 记录"
-  [ -n "${HOST:-}" ] && say "     （域名：$HOST）"
+  say "  1. Tunnels → 删除包含 ${HOST:-该域名} 的隧道"
+  say "  2. DNS → 删除 ${HOST:-该域名} 的 CNAME 记录"
 }
 
 # ---------- 安装 ----------
 
 guide_tunnel() {
-  step "先在 CF 控制台建隧道（30 秒）"
-  cat <<'EOF'
-   Zero Trust → Networks → Tunnels → Create a tunnel
-     1. 选 Cloudflared，命名（例如 argo-node）
-     2. 保存后复制页面上那段 token（很长的一串）
-     3. 路由先别加，下一步脚本会给你要填的地址
-EOF
+  step "创建隧道"
+  say "   1. 在 Cloudflare 控制台 Tunnels 栏目创建一条隧道"
+  say "   2. 保存后复制页面上那段令牌"
 }
 
 install_flow() {
@@ -373,7 +377,11 @@ install_flow() {
   read -rs TOKEN
   say ""
   [ -n "${TOKEN:-}" ] || die "token 不能为空"
-  ok "已读取 token：${#TOKEN} 字符，末 4 位 ${TOKEN: -4}"
+  RAW=$TOKEN
+  TOKEN=$(extract_token "$RAW")
+  [ "$TOKEN" != "$RAW" ] && ok "已从粘贴内容中提取令牌"
+  [ ${#TOKEN} -ge 40 ] || die "这段内容不像隧道令牌（只有 ${#TOKEN} 个字符）"
+  ok "已读取令牌：${#TOKEN} 字符，末 4 位 ${TOKEN: -4}"
 
   PORT=$(pick_port)
   UUID=$(python3 -c 'import uuid;print(uuid.uuid4())')
