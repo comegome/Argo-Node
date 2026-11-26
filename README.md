@@ -20,8 +20,8 @@ sudo bash /tmp/argo-node.sh
 1. **运行脚本**，确认后自动装依赖（cloudflared + sing-box）
 2. **CF 控制台建隧道**：Zero Trust → Networks → Tunnels → Create a tunnel → 选 Cloudflared → 复制 token 粘给脚本
 3. **脚本写本地入口**：固定端口 `2080`（被占用则顺延 2081、2082…），只监听 `127.0.0.1`
-4. **加 Public Hostname**：在隧道页面把脚本给的 `http://127.0.0.1:2080` 粘进 Service URL，类型 HTTP、Path 留空，并选一个公网域名
-5. **回脚本输入那个域名**，脚本启动隧道并校验
+4. **添加路由**：在隧道页面把脚本给的 `http://127.0.0.1:2080` 粘进 Service URL，Path 留空，并选一个公共主机域名
+5. **回脚本输入那个公共主机域名**，脚本启动隧道并校验
 
 端口固定是为了重跑不换号——中途退出重来，面板里填的地址依然有效。
 

@@ -295,7 +295,7 @@ print_client() {
   cat <<EOF
 
 proxies:
-  - name: argo-$(hostname -s)
+  - name: ${HOST%%.*}
     type: vless
     server: $HOST
     port: 443
@@ -352,7 +352,7 @@ guide_tunnel() {
    Zero Trust → Networks → Tunnels → Create a tunnel
      1. 选 Cloudflared，命名（例如 argo-node）
      2. 保存后复制页面上那段 token（很长的一串）
-     3. Public Hostname 先别加，下一步脚本会给你要填的地址
+     3. 路由先别加，下一步脚本会给你要填的地址
 EOF
 }
 
@@ -391,15 +391,11 @@ install_flow() {
     die "配置校验失败，已还原，未做任何改动"
   fi
 
-  step "去 CF 面板给这条隧道加 Public Hostname"
-  say "   类型      HTTP"
-  say "   Path      留空"
+  step "去 CF 面板给这条隧道添加路由"
   say "   服务地址  http://127.0.0.1:$PORT"
+  say "   Path      留空"
   say ""
-  say "   上面那行直接复制到 Service URL 输入框。"
-  say "   如果 zone 里已经有同名的 A 记录，先删掉——A 记录不会导进隧道。"
-  say ""
-  printf '公网域名（刚才在面板里填的那个，例如 argo-node.example.com）: '
+  printf '公共主机域名: '
   read -r HOST
   [ -n "${HOST:-}" ] || die "域名不能为空"
 
