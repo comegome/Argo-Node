@@ -165,7 +165,7 @@ setup_service() {
   chmod 600 "$TOKEN_ENV"
   cat > "$CF_UNIT" <<EOF
 [Unit]
-Description=Cloudflare Tunnel ($HOST)
+Description=Cloudflare Tunnel (argo-node)
 After=network-online.target
 Wants=network-online.target
 
@@ -383,6 +383,23 @@ install_flow() {
   [ ${#TOKEN} -ge 40 ] || die "这段内容不像隧道令牌（只有 ${#TOKEN} 个字符）"
   ok "已读取令牌：${#TOKEN} 字符，末 4 位 ${TOKEN: -4}"
 
+  step "启动隧道"
+  setup_service
+  sleep 3
+  TOKEN_BAD=0
+  if ! check_tunnel; then
+    say ""
+    if [ "${TOKEN_BAD:-0}" = "1" ]; then
+      say "   令牌无效，已回滚。回 Cloudflare 重新复制令牌后重跑脚本。"
+    else
+      say "   隧道没连上，已回滚。原因：journalctl -u $CF_SVC -n 30"
+    fi
+    systemctl disable --now "$CF_SVC" >/dev/null 2>&1
+    rm -f "$CF_UNIT" "$TOKEN_ENV"
+    systemctl daemon-reload
+    exit 1
+  fi
+
   PORT=$(pick_port)
   UUID=$(python3 -c 'import uuid;print(uuid.uuid4())')
   WSPATH="/$(python3 -c 'import secrets;print(secrets.token_hex(8))')"
@@ -409,9 +426,6 @@ install_flow() {
   [ -n "${HOST:-}" ] || die "域名不能为空"
 
   save_node
-  step "启动隧道"
-  setup_service
-  sleep 3
 
   if do_check; then
     say ""
