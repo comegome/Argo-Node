@@ -356,7 +356,7 @@ do_uninstall() {
 
 guide_tunnel() {
   step "创建隧道"
-  say "   1. 在 Cloudflare 控制台 Tunnels 栏目创建一条隧道"
+  say "   1. 在 Cloudflare → Tunnels 创建一条隧道"
   say "   2. 保存后复制页面上那段令牌"
 }
 
