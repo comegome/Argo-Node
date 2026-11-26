@@ -194,15 +194,21 @@ check_tunnel() {
     fi
     return 1
   fi
-  local n since
+  local since lines n edges
   since=$(systemctl show -p ActiveEnterTimestamp --value "$CF_SVC" 2>/dev/null)
   if [ -n "$since" ]; then
-    n=$(journalctl -u "$CF_SVC" --since "$since" --no-pager 2>/dev/null | grep -c "Registered tunnel connection")
+    lines=$(journalctl -u "$CF_SVC" --since "$since" --no-pager 2>/dev/null | grep "Registered tunnel connection")
   else
-    n=$(journalctl -u "$CF_SVC" --no-pager -n 200 2>/dev/null | grep -c "Registered tunnel connection")
+    lines=$(journalctl -u "$CF_SVC" --no-pager -n 200 2>/dev/null | grep "Registered tunnel connection")
   fi
-  [ "$n" -ge 1 ] || { warn "隧道进程在跑，但没有注册到任何边缘（token 多半无效）"; return 1; }
-  ok "隧道已连接（$n 条边缘连接）"
+  [ -n "$lines" ] || { warn "隧道进程在跑，但没有注册到任何边缘（token 多半无效）"; return 1; }
+  n=$(printf '%s\n' "$lines" | grep -o 'connIndex=[0-9]*' | sort -u | wc -l | tr -d ' ')
+  edges=$(printf '%s\n' "$lines" | grep -o 'location=[a-zA-Z0-9]*' | sed 's/location=//' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  if [ -n "$edges" ]; then
+    ok "隧道已连接（$n 条边缘：$edges）"
+  else
+    ok "隧道已连接（$n 条边缘连接）"
+  fi
 }
 
 resolve_ips() {
