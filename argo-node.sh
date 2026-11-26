@@ -399,11 +399,12 @@ install_flow() {
     die "配置校验失败，已还原，未做任何改动"
   fi
 
-  step "去 CF 面板给这条隧道添加路由"
-  say "   服务地址  http://127.0.0.1:$PORT"
-  say "   Path      留空"
+  step "添加路由"
+  say "   主机名：例如 argo-node.example.com"
+  say "   路径：留空"
+  say "   服务地址：http://127.0.0.1:$PORT"
   say ""
-  printf '公共主机域名: '
+  printf '填写完整主机名: '
   read -r HOST
   [ -n "${HOST:-}" ] || die "域名不能为空"
 
