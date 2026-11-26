@@ -1,0 +1,4 @@
+node.json
+*.env
+backup/
+.DS_Store
