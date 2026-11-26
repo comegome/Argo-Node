@@ -194,7 +194,7 @@ check_tunnel() {
     fi
     return 1
   fi
-  local since lines n edges
+  local since lines n
   since=$(systemctl show -p ActiveEnterTimestamp --value "$CF_SVC" 2>/dev/null)
   if [ -n "$since" ]; then
     lines=$(journalctl -u "$CF_SVC" --since "$since" --no-pager 2>/dev/null | grep "Registered tunnel connection")
@@ -203,12 +203,7 @@ check_tunnel() {
   fi
   [ -n "$lines" ] || { warn "隧道进程在跑，但没有注册到任何边缘（token 多半无效）"; return 1; }
   n=$(printf '%s\n' "$lines" | grep -o 'connIndex=[0-9]*' | sort -u | wc -l | tr -d ' ')
-  edges=$(printf '%s\n' "$lines" | grep -o 'location=[a-zA-Z0-9]*' | sed 's/location=//' | sort -u | tr '\n' ' ' | sed 's/ $//')
-  if [ -n "$edges" ]; then
-    ok "隧道已连接（$n 条边缘：$edges）"
-  else
-    ok "隧道已连接（$n 条边缘连接）"
-  fi
+  ok "隧道已连接（$n 条边缘连接）"
 }
 
 resolve_ips() {
