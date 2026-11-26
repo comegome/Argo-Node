@@ -275,7 +275,7 @@ check_ws() {
 
 dashboard_hint() {
   say ""
-  say "   在 Tunnels → 这条隧道 → 添加路由："
+  say "   在 Tunnels → 当前隧道 → 添加路由："
   say "     主机名：$HOST"
   say "     路径：留空"
   say "     服务地址：http://127.0.0.1:$PORT"
