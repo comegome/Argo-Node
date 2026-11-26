@@ -161,6 +161,7 @@ PY
 # ---------- 隧道服务 ----------
 
 setup_service() {
+  mkdir -p "$STATE_DIR"
   printf 'TUNNEL_TOKEN=%s\n' "$TOKEN" > "$TOKEN_ENV"
   chmod 600 "$TOKEN_ENV"
   cat > "$CF_UNIT" <<EOF
@@ -171,6 +172,7 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+TimeoutStartSec=20
 EnvironmentFile=$TOKEN_ENV
 ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run
 Restart=on-failure
@@ -446,14 +448,22 @@ install_flow() {
 
   step "启动隧道"
   setup_service
-  sleep 3
+  local wait_i=0
+  while [ $wait_i -lt 10 ]; do
+    sleep 1
+    wait_i=$((wait_i + 1))
+    check_tunnel >/dev/null 2>&1 && break
+    systemctl is-failed --quiet "$CF_SVC" && break
+  done
   TOKEN_BAD=0
   if ! check_tunnel; then
     say ""
     if [ "${TOKEN_BAD:-0}" = "1" ]; then
       say "   令牌无效，已回滚。回 Cloudflare 重新复制令牌后重跑脚本。"
     else
-      say "   隧道没连上，已回滚。原因：journalctl -u $CF_SVC -n 30"
+      say "   隧道 10 秒内没有注册到边缘，已回滚。"
+      say "   常见原因：令牌对应的隧道已被删除，或本机出站到 CF 被拦。"
+      say "   详细原因：journalctl -u $CF_SVC -n 30"
     fi
     systemctl disable --now "$CF_SVC" >/dev/null 2>&1
     rm -f "$CF_UNIT" "$TOKEN_ENV"
@@ -466,6 +476,10 @@ install_flow() {
   WSPATH="/$(python3 -c 'import secrets;print(secrets.token_hex(8))')"
 
   mkdir -p "$BACKUP_DIR"
+  if [ ! -f "$SB_CONF" ]; then
+    mkdir -p "$(dirname "$SB_CONF")"
+    printf '%s\n' '{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct"}]}' > "$SB_CONF"
+  fi
   cp -a "$SB_CONF" "$BACKUP_DIR/config.json.$(date +%Y%m%d_%H%M%S)"
   apply_inbound
   if sing-box check -c "$SB_CONF" >/dev/null 2>&1; then
