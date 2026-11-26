@@ -352,29 +352,32 @@ EOF
 
 install_flow() {
   preflight
+
+  step "安装依赖"
+  say "   cloudflared（约 40MB）+ sing-box（若未安装）"
+  printf '   继续？[Y/n] '
+  read -r ans
+  case "${ans:-Y}" in [Yy]*) ;; *) die "已取消" ;; esac
+  install_cloudflared
+  ensure_singbox
+
   guide_tunnel
   say ""
   printf '公网域名（客户端要连的地址，需在 CF 面板为该隧道建 Public Hostname，例如 argo-node.example.com）: '
   read -r HOST
-  printf 'Tunnel token: '
+  printf 'Tunnel token（粘贴后回车，输入不回显）: '
   read -rs TOKEN
   say ""
   [ -n "${HOST:-}" ] && [ -n "${TOKEN:-}" ] || die "域名和 token 都不能为空"
+  ok "已读取 token：${#TOKEN} 字符，末 4 位 ${TOKEN: -4}"
 
   PORT=$(pick_port)
   UUID=$(python3 -c 'import uuid;print(uuid.uuid4())')
   WSPATH="/$(python3 -c 'import secrets;print(secrets.token_hex(8))')"
 
-  step "将要安装"
+  step "将要写入"
   say "   域名      $HOST"
   say "   本地入口  127.0.0.1:$PORT（不开放公网端口）"
-  printf '   继续？[Y/n] '
-  read -r ans
-  case "${ans:-Y}" in [Yy]*) ;; *) die "已取消" ;; esac
-
-  step "安装依赖"
-  install_cloudflared
-  ensure_singbox
 
   step "写入 sing-box"
   mkdir -p "$BACKUP_DIR"
