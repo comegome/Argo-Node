@@ -2,7 +2,7 @@
 # argo-node — 单机 + Cloudflare Argo 隧道，把本机变成一个出口节点
 #
 # 交互式，无子命令。运行一次，脚本自己判断该装、该查还是该卸。
-# 只写这四个路径：/usr/local/bin/argo-node、/etc/argo-node/（含自己的 sing-box 配置）、systemd unit
+# 落盘：/etc/argo-node/（自己的 sing-box 配置 + 状态）、两个 systemd unit
 # 不共用 /etc/sing-box/config.json，与 Simple-Box 之类的 sing-box 管理脚本互不干扰。
 # 不开放任何公网端口，入口只在 127.0.0.1。
 
@@ -34,6 +34,7 @@ preflight() {
   ok "${PRETTY_NAME:-unknown} $(uname -m)"
   command -v curl    >/dev/null || die "缺少 curl"
   command -v python3 >/dev/null || die "缺少 python3（改 sing-box 配置要用）"
+  command -v ss      >/dev/null || warn "缺少 ss（iproute2）：端口占用只能靠 bind 探测，中断重跑可能换端口"
   ok "curl / python3 就绪"
 }
 
@@ -49,13 +50,15 @@ arch_tag() {
 
 install_cloudflared() {
   if command -v cloudflared >/dev/null; then
-    ok "cloudflared $(cloudflared --version 2>/dev/null | awk '{print $3}') 已安装"
+    ok "cloudflared $(cloudflared --version 2>/dev/null | awk '{print $3}') 已安装（$(command -v cloudflared)）"
     return
   fi
-  local a; a=$(arch_tag)
-  curl -fsSL -o /tmp/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$a" \
-    || die "下载 cloudflared 失败"
-  install -m 755 /tmp/cloudflared /usr/local/bin/cloudflared && rm -f /tmp/cloudflared
+  local a tmp; a=$(arch_tag)
+  tmp=$(mktemp -d) || die "建临时目录失败"
+  curl -fsSL -o "$tmp/cloudflared" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$a" \
+    || { rm -rf "$tmp"; die "下载 cloudflared 失败"; }
+  install -m 755 "$tmp/cloudflared" /usr/local/bin/cloudflared || { rm -rf "$tmp"; die "安装 cloudflared 失败"; }
+  rm -rf "$tmp"
   ok "cloudflared $(cloudflared --version | awk '{print $3}') 已安装"
 }
 
@@ -65,7 +68,7 @@ migrate_legacy_inbound() {
   local legacy=/etc/sing-box/config.json
   [ -f "$legacy" ] || return 0
   [ -f "$SB_CONF" ] && return 0
-  mkdir -p "$STATE_DIR"
+  install -d -m 700 "$STATE_DIR"
   local r
   r=$(python3 - "$legacy" "$SB_CONF" "$SB_TAG" <<'PY'
 import json, sys
@@ -99,20 +102,24 @@ ensure_singbox() {
   if command -v sing-box >/dev/null; then
     ok "sing-box $(sing-box version | head -1 | awk '{print $3}') 已安装"
   else
-    local a ver; a=$(arch_tag)
+    local a ver tmp; a=$(arch_tag)
     ver=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
           | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"].lstrip("v"))') \
           || die "查询 sing-box 版本失败"
-    curl -fsSL -o /tmp/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v$ver/sing-box-$ver-linux-$a.tar.gz" \
-      || die "下载 sing-box 失败"
-    tar xzf /tmp/sb.tar.gz -C /tmp && install -m 755 "/tmp/sing-box-$ver-linux-$a/sing-box" /usr/local/bin/sing-box
-    rm -rf /tmp/sb.tar.gz "/tmp/sing-box-$ver-linux-$a"
+    tmp=$(mktemp -d) || die "建临时目录失败"
+    curl -fsSL -o "$tmp/sb.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v$ver/sing-box-$ver-linux-$a.tar.gz" \
+      || { rm -rf "$tmp"; die "下载 sing-box 失败"; }
+    tar xzf "$tmp/sb.tar.gz" -C "$tmp" || { rm -rf "$tmp"; die "解包 sing-box 失败"; }
+    install -m 755 "$tmp/sing-box-$ver-linux-$a/sing-box" /usr/local/bin/sing-box \
+      || { rm -rf "$tmp"; die "安装 sing-box 失败"; }
+    rm -rf "$tmp"
     ok "sing-box $ver 已安装"
   fi
 
   migrate_legacy_inbound
-  mkdir -p "$STATE_DIR"
+  install -d -m 700 "$STATE_DIR"
   [ -f "$SB_CONF" ] || printf '%s\n' '{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct"}]}' > "$SB_CONF"
+  local sb_bin; sb_bin=$(command -v sing-box) || die "找不到 sing-box"
   cat > "$SB_UNIT" <<EOF
 [Unit]
 Description=sing-box (argo-node inbound)
@@ -120,7 +127,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c $SB_CONF
+ExecStart=$sb_bin run -c $SB_CONF
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=infinity
@@ -130,18 +137,44 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable "$SB_SVC" >/dev/null 2>&1
-  SB_MANAGED=true
+  chmod 600 "$SB_CONF"
   ok "sing-box 实例 $SB_SVC 就绪（配置 $SB_CONF）"
 }
 
 # ---------- 配置 ----------
 
+# 回环端口是否空闲：优先 ss，没有就用 bind 探测（宁可多跳一个端口也不误判为空闲）
+port_free() {
+  if command -v ss >/dev/null 2>&1; then
+    [ -z "$(ss -lntH "sport = :$1" 2>/dev/null)" ]
+    return
+  fi
+  python3 - "$1" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+
+port_owner_pid() {
+  ss -lntpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2
+}
+
 pick_port() {
-  local p
+  local p main
+  main=$(systemctl show -p MainPID --value "$SB_SVC" 2>/dev/null)
   for p in $(seq "$PORT_BASE" $((PORT_BASE + 20))); do
-    if ! ss -lnt 2>/dev/null | grep -q ":$p "; then echo "$p"; return; fi
-    # 占用者是 sing-box 就复用（多半是我们上次装的那条 inbound）
-    if ss -lntp 2>/dev/null | grep ":$p " | grep -q "sing-box"; then echo "$p"; return; fi
+    if port_free "$p"; then echo "$p"; return; fi
+    # 只复用 sing-box-argo 自己的端口（安装中断后重跑的情形）；
+    # 别的 sing-box 实例（Simple-Box 等）占着的端口一律避开。
+    if [ -n "${main:-}" ] && [ "$main" != 0 ] && [ "$(port_owner_pid "$p")" = "$main" ]; then
+      echo "$p"; return
+    fi
   done
   die "端口 ${PORT_BASE}-$((PORT_BASE + 20)) 都不可用"
 }
@@ -162,19 +195,6 @@ json.dump(d, open(conf, "w"), indent=2, ensure_ascii=False)
 PY
 }
 
-remove_inbound() {
-  [ -f "$SB_CONF" ] || return 0
-  python3 - "$SB_CONF" "$SB_TAG" <<'PY'
-import json, sys
-conf, tag = sys.argv[1:3]
-d = json.load(open(conf))
-before = len(d.get("inbounds", []))
-d["inbounds"] = [i for i in d.get("inbounds", []) if i.get("tag") != tag]
-json.dump(d, open(conf, "w"), indent=2, ensure_ascii=False)
-print("removed" if len(d["inbounds"]) != before else "absent")
-PY
-}
-
 load_node() {
   eval "$(python3 - "$NODE_JSON" <<'PY'
 import json, sys
@@ -182,18 +202,17 @@ from shlex import quote
 d = json.load(open(sys.argv[1]))
 for k in ("host", "port", "uuid", "path"):
     print("%s=%s" % (k.upper() if k != "path" else "WSPATH", quote(str(d[k]))))
-print("SB_MANAGED=%s" % quote(str(d.get("sing_box_managed", False)).lower()))
 PY
 )"
 }
 
 save_node() {
-  mkdir -p "$STATE_DIR"
-  python3 - "$NODE_JSON" "$HOST" "$PORT" "$UUID" "$WSPATH" "$SB_MANAGED" <<'PY'
+  install -d -m 700 "$STATE_DIR"
+  python3 - "$NODE_JSON" "$HOST" "$PORT" "$UUID" "$WSPATH" <<'PY'
 import json, sys, time
-conf, host, port, uuid, path, managed = sys.argv[1:7]
+conf, host, port, uuid, path = sys.argv[1:6]
 json.dump({"host": host, "port": int(port), "uuid": uuid, "path": path,
-           "sing_box_managed": managed == "true", "created": time.strftime("%F %T")},
+           "created": time.strftime("%F %T")},
           open(conf, "w"), indent=2)
 PY
   chmod 600 "$NODE_JSON"
@@ -202,7 +221,8 @@ PY
 # ---------- 隧道服务 ----------
 
 setup_service() {
-  mkdir -p "$STATE_DIR"
+  install -d -m 700 "$STATE_DIR"
+  local cf_bin; cf_bin=$(command -v cloudflared) || die "找不到 cloudflared"
   printf 'TUNNEL_TOKEN=%s\n' "$TOKEN" > "$TOKEN_ENV"
   chmod 600 "$TOKEN_ENV"
   cat > "$CF_UNIT" <<EOF
@@ -215,7 +235,7 @@ Wants=network-online.target
 Type=notify
 TimeoutStartSec=20
 EnvironmentFile=$TOKEN_ENV
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 run
+ExecStart=$cf_bin tunnel --no-autoupdate --protocol http2 run
 Restart=on-failure
 RestartSec=5
 
@@ -231,8 +251,11 @@ extract_token() {
   local raw t
   raw=${1//\"/}
   raw=${raw//\'/}
-  t=$(printf '%s' "$raw" | grep -oE '[A-Za-z0-9_=-]{40,}' | head -1)
-  printf '%s' "${t:-$raw}"
+  # 逐个候选串验证，命中第一个合法令牌就返回（避免抓错前半段的超长参数）
+  while IFS= read -r t; do
+    token_ok "$t" && { printf '%s' "$t"; return; }
+  done < <(printf '%s' "$raw" | grep -oE '[A-Za-z0-9_=-]{40,}')
+  printf '%s' "$raw"
 }
 
 # 令牌必须是 base64 的 {"a":账户,"t":隧道,"s":密钥}
@@ -305,18 +328,24 @@ import sys, ipaddress
 try:
     nets = [ipaddress.ip_network(l.strip()) for l in open(sys.argv[1]) if l.strip() and not l.startswith('#')]
 except Exception:
+    nets = []
+if not nets:
     print("unknown"); raise SystemExit
 hit = [ip for ip in sys.argv[2:] if any(ipaddress.ip_address(ip) in n for n in nets)]
 print("cf" if hit else "notcf")
 PY
 )
   rm -f "$tmp"
-  if [ "$verdict" != "cf" ]; then
-    warn "解析到 $(echo "$ips" | tr '\n' ',' | sed 's/,$//')，不是 Cloudflare 的 IP"
-    say "       （zone 里多半有泛解析 *，要加 Public Hostname 才会生成指向隧道的 CNAME）"
-    return 1
-  fi
-  ok "域名已指向 Cloudflare 边缘（$(echo "$ips" | tr '\n' ',' | sed 's/,$//')）"
+  case "$verdict" in
+    cf) ok "域名已指向 Cloudflare 边缘（$(echo "$ips" | tr '\n' ',' | sed 's/,$//')）" ;;
+    unknown)
+      say "   ! 拉不到 Cloudflare 的 IP 段（cloudflare.com/ips-v4），已跳过域名校验"
+      return 0 ;;
+    *)
+      warn "解析到 $(echo "$ips" | tr '\n' ',' | sed 's/,$//')，不是 Cloudflare 的 IP"
+      say "       （zone 里多半有泛解析 *，要加 Public Hostname 才会生成指向隧道的 CNAME）"
+      return 1 ;;
+  esac
 }
 
 check_ws() {
@@ -324,7 +353,7 @@ check_ws() {
   local rflag=""
   local ip; ip=$(resolve_ips | head -1)
   [ -n "$ip" ] && rflag="--resolve $HOST:443:$ip"
-  code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' $rflag \
+  code=$(curl -s --http1.1 -o /dev/null -m 10 -w '%{http_code}' $rflag \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
     -H "Sec-WebSocket-Key: $(head -c 16 /dev/urandom | base64)" \
     "https://$HOST$WSPATH" 2>/dev/null)
@@ -332,7 +361,7 @@ check_ws() {
     101|400) ok "ws 握手到达本机（HTTP $code）"; return 0 ;;
     404) warn "路径没对上（HTTP 404）——面板里的 Path 或本地 path 不一致"; return 1 ;;
     502|503) warn "边缘连不上本机（HTTP $code）——面板端口应填 127.0.0.1:$PORT"; return 1 ;;
-    1033) warn "隧道没有活跃连接（HTTP 1033）"; return 1 ;;
+    530) warn "隧道没有活跃连接（HTTP 530 / CF 1033）"; return 1 ;;
     000|"")
       warn "连不上 $HOST:443"
       say "       DNS 已指向 CF，但边缘没有这条隧道的路由"
@@ -429,19 +458,18 @@ EOF
 
 do_uninstall() {
   step "卸载"
-  if systemctl list-unit-files 2>/dev/null | grep -q "^$CF_SVC.service"; then
+  # 不先查 unit 是否存在：文件被删过但进程还在时也要停掉
+  if [ -f "$CF_UNIT" ] || systemctl is-active --quiet "$CF_SVC" 2>/dev/null; then
     systemctl disable --now "$CF_SVC" >/dev/null 2>&1
-    rm -f "$CF_UNIT"
-    systemctl daemon-reload
     ok "隧道服务已停止并删除"
   fi
-  if systemctl list-unit-files 2>/dev/null | grep -q "^$SB_SVC.service"; then
+  rm -f "$CF_UNIT"
+  if [ -f "$SB_UNIT" ] || systemctl is-active --quiet "$SB_SVC" 2>/dev/null; then
     systemctl disable --now "$SB_SVC" >/dev/null 2>&1
-    rm -f "$SB_UNIT"
-    systemctl daemon-reload
     ok "sing-box 实例 $SB_SVC 已停止并删除"
   fi
-  rm -f "$SB_CONF"
+  rm -f "$SB_CONF" "$SB_UNIT"
+  systemctl daemon-reload
   rm -rf "$STATE_DIR"
   ok "本地状态已清除"
   say ""
@@ -451,6 +479,23 @@ do_uninstall() {
 }
 
 # ---------- 安装 ----------
+
+# 只接受裸主机名：去掉协议头、路径、查询串、空白，转小写
+norm_host() {
+  local h=${1:-}
+  h=${h#http://}
+  h=${h#https://}
+  h=${h%%/*}
+  h=${h%%\?*}
+  h=${h%%#*}
+  h=${h//[[:space:]]/}
+  h=${h%.}
+  printf '%s' "${h,,}"
+}
+
+host_ok() {
+  [ ${#1} -le 253 ] && [[ $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+}
 
 guide_tunnel() {
   step "创建隧道"
@@ -473,8 +518,9 @@ install_flow() {
   say ""
   printf 'Tunnel token（粘贴后回车，输入不回显）: '
   TOKEN=""
-  for _ in 1 2 3 4 5 6 7 8; do
-    IFS= read -rs LINE || break
+  for i in 1 2 3 4 5 6 7 8; do
+    # 首行等用户粘贴；后续行 1 秒无输入就收工，避免误输后干等 7 次回车
+    if [ "$i" = 1 ]; then IFS= read -rs LINE || break; else IFS= read -rs -t 1 LINE || break; fi
     CAND=$(extract_token "$LINE")
     if token_ok "$CAND"; then TOKEN=$CAND; break; fi
   done
@@ -485,7 +531,7 @@ install_flow() {
   step "启动隧道"
   setup_service
   local wait_i=0
-  while [ $wait_i -lt 10 ]; do
+  while [ $wait_i -lt 20 ]; do
     sleep 1
     wait_i=$((wait_i + 1))
     check_tunnel >/dev/null 2>&1 && break
@@ -497,12 +543,14 @@ install_flow() {
     if [ "${TOKEN_BAD:-0}" = "1" ]; then
       say "   令牌无效，已回滚。回 Cloudflare 重新复制令牌后重跑脚本。"
     else
-      say "   隧道 10 秒内没有注册到边缘，已回滚。"
+      say "   隧道 20 秒内没有注册到边缘，已回滚。"
       say "   常见原因：令牌对应的隧道已被删除，或本机出站到 CF 被拦。"
       say "   详细原因：journalctl -u $CF_SVC -n 30"
     fi
+    # 回滚干净：不留开机自启的空 sing-box 实例；配置留着，重跑时可直接复用端口
     systemctl disable --now "$CF_SVC" >/dev/null 2>&1
-    rm -f "$CF_UNIT" "$TOKEN_ENV"
+    systemctl disable --now "$SB_SVC" >/dev/null 2>&1
+    rm -f "$CF_UNIT" "$SB_UNIT" "$TOKEN_ENV"
     systemctl daemon-reload
     exit 1
   fi
@@ -511,18 +559,19 @@ install_flow() {
   UUID=$(python3 -c 'import uuid;print(uuid.uuid4())')
   WSPATH="/$(python3 -c 'import secrets;print(secrets.token_hex(8))')"
 
-  mkdir -p "$BACKUP_DIR"
+  install -d -m 700 "$BACKUP_DIR"
   if [ ! -f "$SB_CONF" ]; then
     mkdir -p "$(dirname "$SB_CONF")"
     printf '%s\n' '{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct"}]}' > "$SB_CONF"
   fi
-  cp -a "$SB_CONF" "$BACKUP_DIR/config.json.$(date +%Y%m%d_%H%M%S)"
+  local bk; bk="$BACKUP_DIR/config.json.$(date +%Y%m%d_%H%M%S)"
+  cp -a "$SB_CONF" "$bk" && chmod 600 "$bk"
   apply_inbound
   if sing-box check -c "$SB_CONF" >/dev/null 2>&1; then
     systemctl restart "$SB_SVC" >/dev/null 2>&1
     ok "本地入口已写入（仅监听回环）"
   else
-    cp -a "$(ls -t "$BACKUP_DIR"/config.json.* | head -1)" "$SB_CONF"
+    cp -a "$bk" "$SB_CONF"
     die "配置校验失败，已还原，未做任何改动"
   fi
 
@@ -532,8 +581,17 @@ install_flow() {
   say "   服务地址：http://127.0.0.1:$PORT"
   say ""
   printf '填写完整主机名: '
-  read -r HOST
-  [ -n "${HOST:-}" ] || die "域名不能为空"
+  local tries=0
+  while :; do
+    read -r HOST || die "读取主机名失败"
+    HOST=$(norm_host "$HOST")
+    [ -n "$HOST" ] || die "域名不能为空"
+    host_ok "$HOST" && break
+    [ $tries -ge 2 ] && die "主机名不合法：$HOST"
+    tries=$((tries + 1))
+    warn "只填裸主机名（如 argo-node.example.com），不要带 https:// 、路径或空格"
+    printf '重新填写: '
+  done
 
   save_node
 

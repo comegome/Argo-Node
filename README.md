@@ -13,14 +13,14 @@ sudo bash /tmp/argo-node.sh
 
 **不要用 `curl | bash`**。脚本是交互式的，管道会让 `read` 直接读到 EOF，拿不到你输入的域名和 token。
 
-需要：Linux + systemd、root、`curl`、`python3`。`cloudflared` 和 `sing-box` 缺了会自动装（sing-box 已存在则只追加 inbound，不动原有配置）。
+需要：Linux + systemd、root、`curl`、`python3`。`cloudflared` 和 `sing-box` 缺了会自动装；已装的话直接用（`/usr/bin` 或 `/usr/local/bin` 都行，unit 里写的是实际路径）。
 
 ## 流程
 
 1. **运行脚本**，确认后自动装依赖（cloudflared + sing-box）
 2. **CF 控制台建隧道**：Cloudflare → Tunnels → 创建隧道 → 复制令牌粘给脚本（直接粘整条 `cloudflared`/`docker` 命令也行，脚本会自己提取）
 3. **脚本先起隧道验证令牌**：连不上就直接回滚退出，不会让你白跑面板
-4. **脚本写本地入口**：固定端口 `2080`（被占用则顺延 2081、2082…），只监听 `127.0.0.1`
+4. **脚本写本地入口**：优先 `2080`（被别的进程占着就顺延 2081、2082…；安装中断后重跑会沿用自己占着的那个端口），只监听 `127.0.0.1`
 5. **添加路由**：在隧道页面把脚本给的 `http://127.0.0.1:2080` 粘进 Service URL，Path 留空，并选一个公共主机域名
 6. **回脚本输入那个主机名**，脚本启动隧道并校验
 
@@ -39,17 +39,18 @@ sudo bash /tmp/argo-node.sh
 |---|---|---|
 | 隧道 | `systemctl is-active` + journal 里 `Registered tunnel connection` 计数 | token 无效，或 cloudflared 起不来 |
 | 域名 | `dig @1.1.1.1` 解析结果落在 Cloudflare IP 段内 | 没加 Public Hostname，或被 zone 的泛解析 `*` 抢走 |
-| 握手 | `curl` 带 Upgrade 头请求 `https://域名/path`，**400 或 101 都算通** | 404=path 不匹配，502=面板端口错，1033=隧道没连上 |
+| 握手 | `curl --http1.1` 带 Upgrade 头请求 `https://域名/path`，**400 或 101 都算通** | 404=path 不匹配，502/503=面板端口错，530=隧道没连上（CF 1033） |
 
 400 是 sing-box 拒绝非真正的 ws 握手，说明请求已经穿过隧道到达本机——这正是我们想确认的。
 
 ## 落盘
 
 ```
-/etc/argo-node/node.json       # 安装期常量：host / port / uuid / path
-/etc/argo-node/tunnel.env      # tunnel token，600
-/etc/argo-node/sing-box.json   # 本机自己的 sing-box 配置，600
-/etc/argo-node/backup/         # 改配置前的备份
+/etc/argo-node/                 # 700，状态目录
+/etc/argo-node/node.json        # 600，安装期常量：host / port / uuid / path
+/etc/argo-node/tunnel.env       # 600，tunnel token
+/etc/argo-node/sing-box.json    # 600，本机自己的 sing-box 配置（含 UUID）
+/etc/argo-node/backup/          # 700，改配置前的备份（文件 600）
 /etc/systemd/system/sing-box-argo.service
 /etc/systemd/system/cloudflared-argo.service
 ```
@@ -96,6 +97,7 @@ HTTP/2 省约 38% 的 CPU，吞吐还略高。瓶颈在 cloudflared 而不是 si
 ## 安全
 
 - 仓库里没有任何密钥。token 是运行时输入的，只存在目标机 `/etc/argo-node/tunnel.env`（600）
+- 状态目录 `700`，配置与备份一律 `600`：同机的其它本地用户读不到 token 和 UUID
 - 不开放任何公网端口，代理入口只在回环
 - 修改 sing-box 配置前先备份，`sing-box check` 失败自动还原并退出
 
