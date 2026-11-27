@@ -69,9 +69,13 @@ migrate_legacy_inbound() {
   [ -f "$legacy" ] || return 0
   [ -f "$SB_CONF" ] && return 0
   install -d -m 700 "$STATE_DIR"
+  # 动别人工具写的共享配置前先留一份；备份失败就不迁，宁可不动
+  local bak
+  bak="$legacy.bak.$(date +%Y%m%d_%H%M%S)"
+  cp -a "$legacy" "$bak" && chmod 600 "$bak" || { warn "备份 $legacy 失败，跳过迁移"; return 0; }
   local r
   r=$(python3 - "$legacy" "$SB_CONF" "$SB_TAG" <<'PY'
-import json, sys
+import json, os, sys
 legacy, new, tag = sys.argv[1:4]
 try:
     d = json.load(open(legacy))
@@ -84,17 +88,18 @@ json.dump({"log": d.get("log", {"level": "warn"}), "inbounds": inb,
            "outbounds": [{"type": "direct"}]},
           open(new, "w"), indent=2, ensure_ascii=False)
 d["inbounds"] = [i for i in d.get("inbounds", []) if i.get("tag") != tag]
-json.dump(d, open(legacy, "w"), indent=2, ensure_ascii=False)
+# 原子替换：中途失败不会留下被截断的共享配置
+tmp = legacy + ".argo-tmp"
+json.dump(d, open(tmp, "w"), indent=2, ensure_ascii=False)
+os.replace(tmp, legacy)
 print("migrated")
 PY
 ) || return 0
   if [ "$r" = "migrated" ]; then
     chmod 600 "$SB_CONF"
-    # 共享配置若还有服务在跑，重启它释放端口
-    if systemctl list-unit-files 2>/dev/null | grep -q "^sing-box.service"; then
-      systemctl restart sing-box >/dev/null 2>&1 || true
-    fi
-    ok "已把 $SB_TAG 从共享配置迁到 $SB_CONF"
+    # 共享配置若还有服务在跑，重启它释放端口；unit 不存在时这条命令失败也无害
+    systemctl restart sing-box >/dev/null 2>&1 || true
+    ok "已把 $SB_TAG 从共享配置迁到 $SB_CONF（原文件备份为 $(basename "$bak")）"
   fi
 }
 
@@ -297,10 +302,11 @@ check_tunnel() {
     fi
     return 1
   fi
-  local since lines n
-  since=$(systemctl show -p ActiveEnterTimestamp --value "$CF_SVC" 2>/dev/null)
-  if [ -n "$since" ]; then
-    lines=$(journalctl -u "$CF_SVC" --since "$since" --no-pager 2>/dev/null | grep "Registered tunnel connection")
+  local inv lines n
+  # 按 InvocationID 只看本次启动周期的日志：不涉及时区缩写解析，也不受时钟跳变影响
+  inv=$(systemctl show -p InvocationID --value "$CF_SVC" 2>/dev/null)
+  if [ -n "$inv" ]; then
+    lines=$(journalctl _SYSTEMD_INVOCATION_ID="$inv" --no-pager 2>/dev/null | grep "Registered tunnel connection")
   else
     lines=$(journalctl -u "$CF_SVC" --no-pager -n 200 2>/dev/null | grep "Registered tunnel connection")
   fi
@@ -483,6 +489,7 @@ do_uninstall() {
 # 只接受裸主机名：去掉协议头、路径、查询串、空白，转小写
 norm_host() {
   local h=${1:-}
+  h=${h,,}          # 先转小写，否则 HTTPS:// 这种大写协议头剥不掉
   h=${h#http://}
   h=${h#https://}
   h=${h%%/*}
@@ -490,7 +497,7 @@ norm_host() {
   h=${h%%#*}
   h=${h//[[:space:]]/}
   h=${h%.}
-  printf '%s' "${h,,}"
+  printf '%s' "$h"
 }
 
 host_ok() {
