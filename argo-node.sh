@@ -94,13 +94,15 @@ json.dump(d, open(tmp, "w"), indent=2, ensure_ascii=False)
 os.replace(tmp, legacy)
 print("migrated")
 PY
-) || return 0
-  if [ "$r" = "migrated" ]; then
-    chmod 600 "$SB_CONF"
-    # 共享配置若还有服务在跑，重启它释放端口；unit 不存在时这条命令失败也无害
-    systemctl restart sing-box >/dev/null 2>&1 || true
-    ok "已把 $SB_TAG 从共享配置迁到 $SB_CONF（原文件备份为 $(basename "$bak")）"
+)
+  if [ "$r" != "migrated" ]; then
+    rm -f "$bak"     # 没迁移成（没 argo-ws 或配置读不了）就不在别人目录里留备份
+    return 0
   fi
+  chmod 600 "$SB_CONF"
+  # 共享配置若还有服务在跑，重启它释放端口；unit 不存在时这条命令失败也无害
+  systemctl restart sing-box >/dev/null 2>&1 || true
+  ok "已把 $SB_TAG 从共享配置迁到 $SB_CONF（原文件备份为 $(basename "$bak")）"
 }
 
 ensure_singbox() {
